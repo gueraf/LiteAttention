@@ -6,6 +6,7 @@ of read and write skip lists, hiding the complexity from users.
 """
 
 import torch
+import os
 from typing import Optional, Tuple
 
 from _internal.flash_attn_interface import flash_attn_func
@@ -19,6 +20,7 @@ class LiteAttention:
     Args:
         enable_skipping (bool, optional): Whether to enable skip list optimizations. Defaults to False.
         threshold (float, optional): Threshold value for skip list optimization. Defaults to -10.0. If positive, it will be converted to negative.
+        max_batch_size (int, optional): Maximum batch size. Defaults to 4.
         
     Example:
         >>> # Basic usage without skip optimization
@@ -31,7 +33,7 @@ class LiteAttention:
         >>> print(f"Skipped {lite_attn.get_skip_percentage():.2%} computations")
     """
     
-    def __init__(self, enable_skipping: bool = True, threshold: float = -10.0, max_batch_size: int = 4, calc_percentage: bool = False, verbose: bool = False):
+    def __init__(self, enable_skipping: bool = True, threshold: float = -10.0, max_batch_size: int = 4):
         # Internal skip list management
         self._skip_list = None
         self._phase = 0
@@ -47,12 +49,7 @@ class LiteAttention:
         
         # Public configuration
         self.enable_skipping = enable_skipping
-        self.calc_percentage = calc_percentage
-        self.threshold = threshold if threshold < 0 else -threshold
-
-        # we print warrnings if reinitializing the skip lists during the forward pass
-        self.verbose = verbose
-        self.verbose_reinitialization = False
+        self.set_threshold(threshold)
 
         self.max_batch_size = max_batch_size
 
@@ -167,6 +164,9 @@ class LiteAttention:
             self._skip_list = self._init_skip_list(query, value)
             self._phase = 0
 
+            if head_dim < 128:
+                print(f"[Warning]: head_dim={head_dim} is less than 128 which may cause too many tiles to be skipped and a distorted output")
+
             self._last_seq_len = current_seq_len
             self._last_head_dim = current_head_dim
             self._last_v_colmajor = v_colmajor
@@ -174,9 +174,8 @@ class LiteAttention:
             self._last_device = device
             self._last_num_heads = current_num_heads
 
-            if self.verbose and self.verbose_reinitialization:
-                print(f"warrning: reinitialized skip list during the forward pass")
-            self.verbose_reinitialization = True
+            if os.getenv("LITE_ATTENTION_VERBOSE", "FALSE") != "FALSE":
+                print(f"[Warning]: reinitialized skip list during the forward pass")
         
         # Alternate between the two skip list buffers
         if self._phase == 0:
@@ -219,9 +218,10 @@ class LiteAttention:
         )
 
         # Calculate and store statistics if enabled
-        if self.enable_skipping and (read_list is not None) and self.calc_percentage:
+        if self.enable_skipping and os.getenv("LITE_ATTENTION_VERBOSE", "FALSE") != "FALSE":
             real_batch_size = query.shape[0]
             self._last_percentage = self.calc_percentage(read_list[:real_batch_size])
+            print(f"[Info]: Percentage of tiles skipped: {1.0 - self._last_percentage:.2%}")
         
         return output
     
@@ -240,9 +240,12 @@ class LiteAttention:
     
     def set_threshold(self, threshold: float):
         """Update the threshold value for skip list optimization.
-        If threshold is positive, it will be converted to negative.
+        Threshold must be negative when debug mode is not enabled.
         """
-        self.threshold = threshold if threshold < 0 else -threshold
+        if threshold >= 0 and os.getenv("LITE_ATTENTION_DEBUG", "FALSE") == "FALSE":
+            raise ValueError("threshold must be negative when debug mode is not enabled")
+
+        self.threshold = threshold
     
     def enable_skip_optimization(self, enable: bool = True):
         """Enable or disable skip list optimization."""

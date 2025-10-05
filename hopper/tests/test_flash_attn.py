@@ -106,7 +106,7 @@ def test_lite_attn_output(seqlen_q, seqlen_k, d, causal, local, softcap, V_colma
         dv_vals = [256, 512]
     attention_chunk_vals = [torch.randint(1, seqlen_k * 2, (1,)).item(), 0] if not DISABLE_LOCAL else [0]
     for dv, attention_chunk in itertools.product(dv_vals, attention_chunk_vals):
-        lite_attn = LiteAttention(enable_skipping=True, threshold=-3.0, calc_percentage=False, verbose=True)
+        lite_attn = LiteAttention(enable_skipping=True, threshold=-3.0)
 
         print(f"{dv = }, {attention_chunk = }")
         # q_ref = torch.randn(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype_ref)

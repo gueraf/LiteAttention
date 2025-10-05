@@ -563,6 +563,6 @@ setup(
     setup_requires=[
         "packaging",
         "psutil",
-        "ninja>=1.11.1,<1.13.0",
+        "ninja",
     ],
 )

@@ -3,7 +3,7 @@
 LiteAttention is a lightweight Flash Attention 3 wrapper with skip list optimization.
 
 ## Requirements
-- H100 / H800 GPU
+- H100 / H200 GPU
 - CUDA >= 12.8
 - CUDA toolkit
 - PyTorch 2.2 and above
@@ -38,12 +38,14 @@ MAX_JOBS=4 pip install flash-attn --no-build-isolation
 ## How to use LiteAttention
 
 ```python
+def LiteAttention(enable_skipping: bool = True, threshold: float = -10.0, max_batch_size: int = 4)
+```
+
+```python
 from lite_attention import LiteAttention, 
 
 
 # In your model, set the attention class to be LiteAttention with an optional threshold
-# NOTE: `threshold` should be a negative number where the lower it is the less skipping there is.
-# NOTE: If a positive number is given, it will be converted to negative (for example 10 ==> -10)
 self.attn = LiteAttention(threshold=-6.0)
 .
 .
@@ -63,6 +65,88 @@ self.attn.reset_skip_state()
 # or to toggle the skipping optimization; turning it off falls back to regular FA3
 self.attn.enable_skip_optimization(enable=False)
 ```
+
+> [!NOTE]
+> LiteAttention should only be used in DiT model
+
+> [!NOTE]
+> LiteAttention should only be used in Self Attention and should not be used in Cross Attention
+
+## Example of Wan2.1 14B
+
+Import the lite attention module into the [model.py](https://github.com/Wan-Video/Wan2.1/blob/main/wan/modules/model.py) file
+
+```python
+# Import lite_attention for optimized attention
+try:
+    from lite_attention import LiteAttention
+    LITE_ATTENTION_AVAILABLE = True
+except ImportError:
+    LITE_ATTENTION_AVAILABLE = False
+```
+
+Then update the [WanSelfAttention class'](https://github.com/Wan-Video/Wan2.1/blob/main/wan/modules/model.py#L105) __init__ function to initialize the lite_attention class
+
+```python
+class WanSelfAttention(nn.Module):
+    def __init__(...):
+      .
+      .
+      .
+      # Initialize LiteAttention if available
+      if LITE_ATTENTION_AVAILABLE:
+          print("Using LiteAttention")
+          self.lite_attention = LiteAttention(enable_skipping=True, threshold=-10.0)
+      else:
+          self.lite_attention = None
+```
+
+Lastly, update the forward function to call the lite_attention instance:
+
+```python
+    def forward(self, x, seq_lens, grid_sizes, freqs):
+      .
+      .
+      .
+      # Apply RoPE to q and k
+      q_rope = rope_apply(q, grid_sizes, freqs)
+      k_rope = rope_apply(k, grid_sizes, freqs)
+
+      # Use LiteAttention if available, otherwise fall back to flash_attention
+      if self.lite_attention is not None:
+          # LiteAttention expects (batch, seq_len, heads, head_dim) format
+          # and returns (batch, seq_len, heads * head_dim) format
+          # Convert to bfloat16 for memory efficiency; FA3 does not support float32
+          q_rope = q_rope.bfloat16()
+          k_rope = k_rope.bfloat16()
+          v = v.bfloat16()
+          x = self.lite_attention(q_rope, k_rope, v)
+          # Convert result back to float32 to maintain consistency with model expectations
+          x = x.float()
+      else:
+          x = flash_attention(
+              q=q_rope,
+              k=k_rope,
+              v=v,
+              k_lens=seq_lens,
+              window_size=self.window_size)
+```
+
+### Wan2.1 Times
+
+| Threshold           | Time    | Uploaded Video                |
+|:-------------------:|:-------:|:-----------------------------:|
+| Baseline (no skip)  | 23m55s  | ![baseline](assets/wan_outputs/baseline.gif)|
+| -10                 | 15m58s  | ![thershold -10](assets/wan_outputs/minus10.gif)|
+| -3                  | 11m50s  | ![thershold -3](assets/wan_outputs/minus3.gif)|
+| 0                   | 8m8s    | ![thershold zero](assets/wan_outputs/zero.gif)|
+
+
+## Debugging
+
+You can see additional debug logs by setting the `LITE_ATTENTION_VERBOSE` to anything other than "FALSE"
+
+If you want to be able to test thresholds greater than 0, you need to set the `LITE_ATTENTION_DEBUG` environment variable to anything other than "FALSE"
 
 ## License
 
