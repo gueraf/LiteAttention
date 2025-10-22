@@ -159,6 +159,13 @@ namespace flash
 
                 // find the local max for each row
                 Tensor scores_max_local = make_fragment_like(row_max);
+                /*
+                inside reduce_max, each thread reduces over the columns he holds.
+                each thread holds a querter of the columns, for example:
+                for headdim == 128, we have 176 columns so each thread holds 176 / 4 = 44 columns.
+                each 4 consecutive threads hold TOGTHER the full row.
+                after the thread level reduction, we reduce across each 4 consecutive threads and get the local max for the row.
+                */
                 flash::template reduce_max</*zero_init=*/true>(scores, scores_max_local);
 
                 // update row max
