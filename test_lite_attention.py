@@ -29,7 +29,9 @@ for head_dim in [32, 64, 96, 128, 192, 256]:
     attn.threshold = float('inf')
     # attn.threshold = float(0.0)
     torch.cuda.synchronize()
-    output = attn(q, k, v, must_do_list = [2,k.shape[1]-1,0])
+    must_do_list = [2,k.shape[1]-1,0]
+    print("must_do_list", must_do_list)
+    output = attn(q, k, v, must_do_list = must_do_list)
     torch.cuda.synchronize()
     passed = (attn._skip_list[1] == attn._skip_list[0]).all()
     print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")

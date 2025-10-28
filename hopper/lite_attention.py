@@ -204,7 +204,10 @@ class LiteAttention:
             else:
                 must_do_list[i] = must_do_list[i] // k_tile_size  # round down end indices
 
+        # print("must_do_list", must_do_list)
+
         values = torch.tensor(must_do_list, dtype=torch.int32, device=device)
+        values = torch.cat([values, torch.zeros(list_shape[3] - values.size(0), dtype=values.dtype, device=values.device)])
         expanded = values.repeat(*list_shape[:3], 1).contiguous()
         return expanded
     
@@ -225,15 +228,13 @@ class LiteAttention:
         # Get read and write lists (internal mask management)
         read_list, write_list = self._get_read_write_lists(query, value)
 
-        print("query shape",query.shape)
-        print("w list shape",write_list.shape)
-        print("r list shape",read_list.shape)
-
         # handle must-do list
         if must_do_list is not None:
-            must_do_list_expanded = self._expand_must_do_list(must_do_list, write_list.shape, query.device)
+            must_do_list_expanded = self._expand_must_do_list(must_do_list, write_list.shape, query, value)
         else:
-            must_do_list_expanded = self._expand_must_do_list([2,0,0], write_list.shape, query.device)
+            must_do_list_expanded = self._expand_must_do_list([2,0,0], write_list.shape, query, value)
+
+        # print("must_do_list_expanded", must_do_list_expanded.shape)
         
         # Perform flash attention 3 with skip lists
         output = flash_attn_func(
