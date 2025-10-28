@@ -24,13 +24,30 @@ for head_dim in [32, 64, 96, 128, 192, 256]:
         print(attn._skip_list.shape)
         print(attn._skip_list[1, 0, 0, 0, :])
 
+    # test must do
+    attn = LiteAttention()
+    attn.threshold = float('inf')
+    # attn.threshold = float(0.0)
+    torch.cuda.synchronize()
+    output = attn(q, k, v, must_do_list = [2,k.shape[1]-1,0])
+    torch.cuda.synchronize()
+    passed = (attn._skip_list[1] == attn._skip_list[0]).all()
+    print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+    print("head_dim: ", head_dim)
+    print("skip all test:", passed)
+    if not passed:
+        print(output.shape)
+        print(attn._skip_list.shape)
+        print(attn._skip_list[1, 0, 0, 0, :])
+    print("must do test:", passed)
+
     # skip nothing test
     attn = LiteAttention()
     attn.threshold = float('-inf')
     torch.cuda.synchronize()
     output = attn(q, k, v)
     torch.cuda.synchronize()
-    passed = (attn._skip_list[1] == attn._skip_list[1]).all()
+    passed = (attn._skip_list[1] == attn._skip_list[0]).all()
     print("skip nothing test:", passed)
     
     # Test softmax_lse correctness (with skip optimization disabled)
