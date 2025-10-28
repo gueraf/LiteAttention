@@ -82,6 +82,8 @@ namespace flash
 
             // we ignore the edge case which skip_list_len == 0 because even in this case
             // we will be better off loading the first range because it's like to use the first range 2 timesteps ago
+
+            // for empty list just input [2,0,0] and no need for extra handling
             load_range();
         }
 
@@ -142,8 +144,17 @@ namespace flash
 
         // Record a transition in skip state
         __device__ __forceinline__ 
-        void record_transition(bool skip, int n_block)
+        void record_transition(bool skip, int n_block, SkipListReader* must_do_reader = nullptr)
         {
+            if(must_do_reader && skip){
+                // advance the must_do list
+                if (must_do_reader->end_idx > n_block && must_do_reader->has_more()){ // this is an if and not a while sinve the n_block index can never skip a must-do range so it cant get too much ahead
+                    must_do_reader->advance();
+                    must_do_reader->load_range();
+                }
+                bool must_do = n_block <= must_do_reader->start_idx && n_block > must_do_reader->end_idx; // check if we are inside a must-do range
+                skip = skip && !must_do;
+            }
             if (is_saving_thread && (skip != is_skipping))
             {
                 list_ptr[write_idx] = n_block;
@@ -1153,7 +1164,8 @@ namespace flash
             }
 
             int n_block_prev = n_block;
-
+            
+            // load blocks in skippable kernel case
             if constexpr (Is_skipable){
                 // finish the first range
                 // ++n_block;
@@ -1176,6 +1188,7 @@ namespace flash
                 {
                     skip_reader.load_range();
                     #pragma unroll 1
+                    // load non-skipped blocks
                     for (n_block = skip_reader.start_idx; n_block >= skip_reader.end_idx; n_block--)
                     {
                         // // this happens only in the first iteration of the loop
@@ -1478,6 +1491,7 @@ namespace flash
                 pipeline.consumer_wait(smem_pipe_read, barrier_token);
             };
             SkipListReader skip_reader;
+            SkipListReader must_do_reader;
             SkipListWriter skip_writer;
             if constexpr (Is_skipable){
                 skip_reader.init<TileShape_MNK>(params, bidb, bidh, m_block);
@@ -1790,7 +1804,7 @@ namespace flash
                         for (; n_block >= skip_reader.end_idx; n_block--)
                         {
                             skip = fwd_step(n_block, no_mask_fn, cute::false_type{} /*check_inf*/);
-                            if constexpr (IsSkipWriter) skip_writer.record_transition(skip, n_block);
+                            if constexpr (IsSkipWriter) skip_writer.record_transition(skip, n_block, &must_do_reader);
                         }
 
                         if constexpr (IsSkipWriter) skip_writer.record_range_end(skip, skip_reader.end_idx);
@@ -1798,6 +1812,7 @@ namespace flash
                         skip_reader.advance();
                         if (!skip_reader.has_more()) break;
 
+                        // jump to next range
                         skip_reader.load_range();
                         n_block = skip_reader.start_idx;
 
@@ -2021,14 +2036,15 @@ namespace flash
                     // }
                     // if constexpr (IsSkipWriter) skip_writer.finalize();
 
-                    if constexpr (IsSkipWriter) skip_writer.record_transition(skip, n_block);
+                    if constexpr (IsSkipWriter) skip_writer.record_transition(skip, n_block, &must_do_reader);
                     --n_block;
                     do
                     {
+
                         for (; n_block >= skip_reader.end_idx; n_block--)
                         {
                             skip = fwd_step(n_block, no_mask_fn, cute::false_type{} /*check_inf*/, cute::false_type{} /*is_first_iter*/);
-                            if constexpr (IsSkipWriter) skip_writer.record_transition(skip, n_block);
+                            if constexpr (IsSkipWriter) skip_writer.record_transition(skip, n_block, &must_do_reader);
                         }
 
                         if constexpr (IsSkipWriter) skip_writer.record_range_end(skip, skip_reader.end_idx);
