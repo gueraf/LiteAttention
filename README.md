@@ -88,8 +88,7 @@ self.attn(query, key, value, scale, must_do_list = must_do_list)
 
 The must_do_list defines ranges that must not be skipped and the format is as follows:
 
-    must_do_list = [length, start_0, end_0, start_1, end_1, ..., start_(length/2-1), end_(length/2-1)]
-    length - number of elements in the list.
+    must_do_list = [start_0, end_0, start_1, end_1, ...]
     start_i - start index of a range we must no skip. (inclusive)
     end_i - end index of a range we must not skip. (exclusive)
     IMPORTANT: start_i > end_i > start_(i+1) > end_(i+1) > ... because we iterate in reverse order inside of the kernel.
@@ -97,7 +96,7 @@ The must_do_list defines ranges that must not be skipped and the format is as fo
 For example, if we have a sequence of length 100, the must_do_list could look like this:
 
 ```python
-must_do_list = [6, 80, 60, 45, 40, 12, 2]
+must_do_list = [80, 60, 45, 40, 12, 2]
 ```
 
 ### Multi-GPU Usage (Sequence Parallelism)

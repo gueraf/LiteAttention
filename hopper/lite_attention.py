@@ -201,6 +201,8 @@ class LiteAttention:
         element_size = dtype.itemsize
         q_tile_size, k_tile_size = LiteAttention.get_MN(head_dim, element_size, v_colmajor)
 
+        must_do_list = [len(must_do_list)] + must_do_list # append the list length at the start
+
         # from sequence indices to block indices:
         for i in range(1,must_do_list[0]+1):
             if i % 2 == 1:
@@ -236,7 +238,7 @@ class LiteAttention:
         if must_do_list is not None:
             must_do_list_expanded = self._expand_must_do_list(must_do_list, write_list.shape, query, value)
         else:
-            must_do_list_expanded = self._expand_must_do_list([2,0,0], write_list.shape, query, value)  # [2,0,0] is for an empty must-do list
+            must_do_list_expanded = self._expand_must_do_list([0,0], write_list.shape, query, value)  # [0,0] is for an empty must-do list
 
         # print("must_do_list_expanded", must_do_list_expanded.shape)
         

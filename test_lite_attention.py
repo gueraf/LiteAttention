@@ -28,7 +28,7 @@ for head_dim in [32, 64, 96, 128, 192, 256]:
     attn = LiteAttention()
     attn.threshold = float('inf') # skip all
     torch.cuda.synchronize()
-    must_do_list = [2,k.shape[1]-1,0]  # must not skip anything
+    must_do_list = [k.shape[1]-1,0]  # must not skip anything
     print("must_do_list", must_do_list)
     output = attn(q, k, v, must_do_list = must_do_list)
     torch.cuda.synchronize()
