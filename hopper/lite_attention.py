@@ -77,9 +77,14 @@ must_do_list = [0, 128, 500, 640]  # Compute sequence positions [0, 128) and [50
 
 import torch
 import os
+import math
 from typing import Optional, Tuple, Union
 
 from ._internal.flash_attn_interface import flash_attn_func
+
+# Import the C++ extension to register operators with PyTorch
+import lite_attention._C  # noqa: F401
+_lite_attention_ops = torch.ops.lite_attention
 
 
 class LiteAttention:
@@ -132,11 +137,12 @@ class LiteAttention:
         >>> output = lite_attn(query, key, value)
     """
     
-    def __init__(self, enable_skipping: bool = True, threshold: float = -10.0, max_batch_size: int = 2, reverse_skip_list: bool = True):
+    def __init__(self, enable_skipping: bool = True, threshold: float = -10.0, max_batch_size: int = 2, reverse_skip_list: bool = True, use_int8: bool = False):
         # Internal skip list management
         self._skip_list = None  # Shape: [2, max_batch_size, heads, qtiles, ktiles+1]
         self._phase = 0  # Alternates between 0 and 1 for double-buffering
         self.reverse_skip_list = reverse_skip_list  # Controls skip list format
+        self.use_int8 = use_int8  # Whether using int8 quantization
         
         # Cache of last tensor properties (used to detect when reinitialization is needed)
         self._last_batch_size = None  # Actual batch size used (not max_batch_size)
@@ -146,9 +152,9 @@ class LiteAttention:
         self._last_dtype = None  # Data type (fp16, bf16, fp32)
         self._last_device = None  # Device (cuda:0, cuda:1, etc.)
         self._last_num_heads = None  # Number of attention heads
-
         # Statistics
         self._last_percentage = 0.0  # Percentage of tiles computed in last pass
+        self._last_use_int8 = use_int8  # Whether using int8 quantization in last pass
         
         # Public configuration
         self.enable_skipping = enable_skipping
@@ -248,7 +254,7 @@ class LiteAttention:
         return LiteAttention.calc_percentage_per_head(read_list).mean()
 
     @staticmethod
-    def get_MN(head_dim, element_size, v_colmajor=False):
+    def get_MN(head_dim, dtype, v_colmajor=False, is_skipable=True):
         """
         Get the tile sizes (block dimensions) for attention computation.
         
@@ -256,47 +262,40 @@ class LiteAttention:
         for computation. Different head dimensions and data types require different
         tile sizes for optimal performance.
         
-        **Important**: This logic is designed to mirror the tile size selection in
-        `tile_size_fwd_sm90()` from `tile_size.h`. The if-statement structure and
-        tile size values should match to ensure consistency with the CUDA kernel.
+        This function directly calls the C++ `tile_size_fwd_sm90()` function from
+        `tile_size.h` to ensure consistency between Python and CUDA kernel tile sizes.
         
         Args:
             head_dim (int): Dimension of each attention head
-            element_size (int): Size in bytes of each element (2 for fp16/bf16, 4 for fp32)
+            dtype (torch.dtype): Data type of the tensors (fp16, bf16, fp32, int8)
             v_colmajor (bool, optional): Whether value tensor is column-major. Defaults to False.
+            is_int8 (bool, optional): Whether using int8 quantization. Defaults to False.
         
         Returns:
             tuple[int, int]: (kBlockM, kBlockN) where:
                 - kBlockM: Number of rows per tile (query dimension)
                 - kBlockN: Number of columns per tile (key dimension)
-        
-        Note:
-        ----
-        If the C++ kernel's tile size logic is updated in `tile_size.h`, this Python
-        function must be updated to match the same branching structure and values.
         """
-        if element_size == 2:
-            if head_dim <= 64:
-                return 192, 192
-            elif head_dim <= 96:
-                return 192, 144
-            elif head_dim <= 128:
-                return 128, 176
-            elif head_dim <= 192:
-                return 128, 112
-            else:
-                return 128, 80
-        else:
-            if head_dim <= 64:
-                return 192, 160
-            elif head_dim <= 96:
-                return 192, 128
-            elif head_dim <= 128:
-                return 128, (192 if v_colmajor else 224)
-            elif head_dim <= 192:
-                return 128, 160
-            else:
-                return 128, 128
+        is_int8 = dtype == torch.int8
+        element_size = dtype.itemsize
+        # Call C++ tile_size_fwd_sm90 function
+        # Arguments: headdim, headdim_v, is_causal, is_local, element_size, 
+        #            v_colmajor, paged_kv_non_TMA, softcap, is_skipable, is_int8
+        # Returns: [kBlockM, kBlockN, MmaPV_is_RS, IntraWGOverlap]
+        result = _lite_attention_ops.get_tile_size_fwd_sm90(
+            head_dim,           # headdim
+            head_dim,           # headdim_v (same as headdim for standard attention)
+            False,              # is_causal (not relevant for skipable case)
+            False,              # is_local
+            element_size,       # element_size (2 for fp16/bf16, 4 for fp32)
+            v_colmajor,         # v_colmajor
+            False,              # paged_kv_non_TMA
+            False,              # softcap
+            is_skipable,        # is_skipable
+            is_int8             # is_int8
+        )
+        kBlockM, kBlockN = result[0], result[1]
+        return kBlockM, kBlockN
 
     @staticmethod
     def init_skip_list(batch, seq_len, heads, head_dim, v_colmajor, dtype, device, must_skip_list: list = None, reverse_skip_list: bool = True) -> torch.Tensor:
@@ -342,13 +341,10 @@ class LiteAttention:
         Which computes all tiles: ktiles-1, ktiles-2, ..., 1, 0 (inclusive)
         """
 
-        # Calculate element size (bytes per element: 2 for fp16/bf16, 4 for fp32)
-        element_size = dtype.itemsize
-        
         # Get tile dimensions for this configuration
         # kBlockM: number of query rows per tile
         # kBlockN: number of key columns per tile
-        kBlockM, kBlockN = LiteAttention.get_MN(head_dim, element_size, v_colmajor)
+        kBlockM, kBlockN = LiteAttention.get_MN(head_dim, dtype, v_colmajor)
 
         # Calculate number of tiles needed to cover the attention matrix
         # qtiles: number of tiles along query dimension (rows of Q@K^T)
@@ -408,7 +404,7 @@ class LiteAttention:
         
         # Determine if value tensor is column-major (affects tile size selection)
         v_colmajor = value.shape[-3] == head_dim
-        dtype = query.dtype
+        dtype = torch.int8 if self.use_int8 else query.dtype
         device = query.device
         
         # Allocate for max_batch_size to avoid reallocation on batch size changes
@@ -460,21 +456,25 @@ class LiteAttention:
         current_head_dim = head_dim
         current_num_heads = query.shape[2]
         v_colmajor = value.shape[-3] == head_dim
-        dtype = query.dtype
+        dtype = torch.int8 if self.use_int8 else query.dtype
         device = query.device
-        
-        # Initialize or reinitialize skip list if needed
-        # we always enter this in the first call
-        if (self._skip_list is None or 
+
+        should_reinitialize = (self._skip_list is None or 
             self._last_seq_len != current_seq_len or 
             self._skip_list.device != query.device or
             self._last_head_dim != current_head_dim or
             self._last_v_colmajor != v_colmajor or
             self._last_dtype != dtype or
             self._last_device != device or
-            self._last_num_heads != current_num_heads
-            ):
+            self._last_num_heads != current_num_heads)
 
+        if self.use_int8 != self._last_use_int8 and not should_reinitialize:
+            should_reinitialize = LiteAttention.get_MN(head_dim, torch.int8, v_colmajor) != LiteAttention.get_MN(head_dim, dtype, v_colmajor)
+            self._last_use_int8 = self.use_int8
+
+        # Initialize or reinitialize skip list if needed
+        # we always enter this in the first call
+        if should_reinitialize:
             # initialize the skip list (actually allocate the memory)
             self._skip_list = self._init_skip_list(query, value, must_skip_list)
             # ditermines which part of self._skip_list to use for read_list and write_list
@@ -488,6 +488,7 @@ class LiteAttention:
             self._last_device = device
             self._last_num_heads = current_num_heads
             self._last_batch_size = query.shape[0]
+            self._last_use_int8 = self.use_int8
 
             if os.getenv("LITE_ATTENTION_VERBOSE", "FALSE") != "FALSE":
                 print(f"[Warning]: reinitialized skip list during the forward pass")
@@ -507,7 +508,7 @@ class LiteAttention:
         return read_list, write_list
 
     @staticmethod
-    def _expand_must_do_list(must_do_list, list_shape, query, value):
+    def _expand_must_do_list(must_do_list, list_shape, query, value, use_int8: bool = False):
         """
         Convert user-provided must-do list from sequence indices to tile indices.
         
@@ -564,12 +565,11 @@ class LiteAttention:
         # Extract tensor properties needed for tile size calculation
         head_dim = query.shape[-1]
         v_colmajor = value.shape[-3] == head_dim
-        dtype = query.dtype
+        dtype = torch.int8 if use_int8 else query.dtype
         device = query.device
 
         # Get tile dimensions (kBlockM, kBlockN)
-        element_size = dtype.itemsize
-        _, k_tile_size = LiteAttention.get_MN(head_dim, element_size, v_colmajor)
+        _, k_tile_size = LiteAttention.get_MN(head_dim, dtype, v_colmajor)
         
         # Prepend the length and convert to tensor
         result = LiteAttention.convert_sequence_indices_to_tile_indices("must_do_list", must_do_list, k_tile_size, value.shape[1])
@@ -630,6 +630,36 @@ class LiteAttention:
 
         return merged + [s, e]
     
+    def _quantize_query_key(self, query: torch.Tensor, key: torch.Tensor, scale: Optional[float] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        SageAttention-style quantization for Q and K:
+        - Q: per-block quantization (kBlockM tokens share a scale per head)
+        - K: smooth by subtracting channel-wise mean (per head_dim element), then per-block quantization
+        
+        The K smoothing reduces channel-wise outliers without affecting attention scores
+        (since softmax is shift-invariant along the K dimension).
+        """
+        if self.use_int8:
+            # Pre-compute K mean
+            # K shape: [batch, seqlen_k, num_heads, head_dim] -> mean: [batch, num_heads, head_dim]
+            k_mean = key.mean(dim=1).float().contiguous()
+
+            # Compute q_scale: log2(e) / sqrt(head_dim) = 1.44269504089 / sqrt(head_dim)
+            head_dim = query.shape[-1]
+
+            if scale is None:
+                q_scale = 1.44269504089 / math.sqrt(head_dim)
+            else:
+                q_scale = 1.44269504089 * scale
+
+            q_int8, k_int8, q_descale, k_descale = _lite_attention_ops.quantize_qk(
+                query, key, k_mean, False, self.enable_skipping, q_scale
+            )
+            
+            return q_int8, k_int8, q_descale, k_descale
+        else:
+            return query, key, None, None
+    
     def __call__(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, 
                  scale: Optional[float] = None, return_softmax_lse: bool = False, must_do_list: list = None, must_skip_list: list = None) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
@@ -684,12 +714,16 @@ class LiteAttention:
         >>> # Force computation for positions [0, 128) and [500, 640) (exclusive end)
         >>> output = lite_attn(q, k, v, must_do_list=[0, 128, 500, 640])
         """
+
+        # quantize the query, key if needed and get the dequantization scales
+        query, key, q_descale, k_descale = self._quantize_query_key(query, key, scale)
+
         # Get read and write lists (internal mask management)
         read_list, write_list = self._get_read_write_lists(query, value, must_skip_list)
 
         if self.enable_skipping and (must_do_list is not None):
             # handle must-do list - expand the 1d list to a list per head per batch per qi
-            must_do_list_expanded = self._expand_must_do_list(must_do_list, write_list.shape, query, value)
+            must_do_list_expanded = self._expand_must_do_list(must_do_list, write_list.shape, query, value, self.use_int8)
         else:
             must_do_list_expanded = None
 
@@ -700,7 +734,7 @@ class LiteAttention:
             q=query,
             k=key, 
             v=value,
-            softmax_scale=scale,
+            softmax_scale=None if self.use_int8 else scale,
             attn_read_list=read_list,
             attn_must_do_list=must_do_list_expanded,
             attn_write_list=write_list,
@@ -709,6 +743,8 @@ class LiteAttention:
             reverse_skip_list=self.reverse_skip_list,
             # self._phase == 1 because we changed it in _get_read_write_lists!
             phase=(self._phase == 1) if self.reverse_skip_list else False,
+            q_descale=q_descale,
+            k_descale=k_descale,
         )
 
         # Calculate and store statistics if enabled
@@ -883,7 +919,9 @@ class LiteAttention:
                 batch_head_dir = os.path.join(save_path, f"batch_{b}", f"head_{h}")
                 os.makedirs(batch_head_dir, exist_ok=True)
 
-        kBlockM, kBlockN = LiteAttention.get_MN(key.shape[-1], key.dtype.itemsize)
+        # kBlockM, kBlockN = LiteAttention.get_MN(key.shape[-1], key.dtype)
+        kBlockM, kBlockN = LiteAttention.get_MN(key.shape[-1], torch.int8 if self.use_int8 else key.dtype)
+
         # Add grid overlay
         height, width = max_res, max_res
         ratio_height = height / seq_len_q
@@ -1043,10 +1081,10 @@ class SeqParallelLiteAttention:
     >>> # Node 1 processes its portion
     >>> output_1 = seq_parallel_attn(q_1, k_1, v_1, split_idx=1)
     """
-    def __init__(self, num_nodes: int, enable_skipping: bool = True, threshold: float = -10.0, max_batch_size: int = 2):
+    def __init__(self, num_nodes: int, enable_skipping: bool = True, threshold: float = -10.0, max_batch_size: int = 2, use_int8: bool = False):
         self.num_nodes = num_nodes
         # Create separate LiteAttention instance for each node
-        self.lite_attention = [LiteAttention(enable_skipping, threshold, max_batch_size) for _ in range(num_nodes)]
+        self.lite_attention = [LiteAttention(enable_skipping, threshold, max_batch_size, use_int8) for _ in range(num_nodes)]
         self.set_threshold(threshold)
 
     def __call__(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, split_idx: int,
