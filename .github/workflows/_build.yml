@@ -53,6 +53,11 @@ jobs:
           ref: ${{ inputs.release-version }}
           submodules: recursive
 
+      - name: Checkout submodules
+        run: |
+          git submodule sync
+          git submodule update --init --recursive
+
       - name: Verify submodules
         run: |
           if [ ! -f "csrc/cutlass/include/cute/tensor.hpp" ]; then
