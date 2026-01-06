@@ -53,6 +53,15 @@ jobs:
           ref: ${{ inputs.release-version }}
           submodules: recursive
 
+      - name: Verify submodules
+        run: |
+          if [ ! -f "csrc/cutlass/include/cute/tensor.hpp" ]; then
+            echo "Error: csrc/cutlass submodule not checked out correctly!"
+            ls -R csrc
+            exit 1
+          fi
+          echo "Submodules verified."
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
