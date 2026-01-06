@@ -37,7 +37,7 @@ echo "Requesting GitHub runner registration token..."
 REG_TOKEN="$(curl -fsS -X POST \
   -H 'Accept: application/vnd.github+json' \
   -H "Authorization: token ${PAT}" \
-  https://api.github.com/repos/gueraf/flash-attention/actions/runners/registration-token | jq -r '.token')"
+  https://api.github.com/repos/gueraf/LiteAttention/actions/runners/registration-token | jq -r '.token')"
 
 if [[ -z "${REG_TOKEN}" || "${REG_TOKEN}" == "null" ]]; then
   echo "Failed to obtain a runner registration token from GitHub." >&2
@@ -47,19 +47,19 @@ fi
 echo "Obtained registration token: ${REG_TOKEN}"
 
 # Remove existing container if it exists (force)
-if docker ps -a --format '{{.Names}}' | grep -qx gh-runner-fa; then
-  echo "Removing existing gh-runner-fa container..."
-  docker rm -f gh-runner-fa >/dev/null
+if docker ps -a --format '{{.Names}}' | grep -qx gh-runner-la; then
+  echo "Removing existing gh-runner-la container..."
+  docker rm -f gh-runner-la >/dev/null
 fi
 
 echo "Starting runner container..."
 DOCKER_HOST_HOSTNAME="$(hostname)"
 echo "Docker host hostname: ${DOCKER_HOST_HOSTNAME}"
 echo "Runner will be registered as: ${DOCKER_HOST_HOSTNAME}"
-docker run -d --restart=always --name gh-runner-fa \
+docker run -d --restart=always --name gh-runner-la \
     --gpus all \
     --shm-size 8G \
-    -e REPO_HTTPS_URL=https://github.com/gueraf/flash-attention \
+    -e REPO_HTTPS_URL=https://github.com/gueraf/LiteAttention \
     -e REPO_TOKEN="${REG_TOKEN}" \
     -e RUNNER_NAME="${DOCKER_HOST_HOSTNAME}" \
     -e RUNNER_LABELS="self-hosted,Linux,${RUNNER_ARCH},gpu,${DOCKER_HOST_HOSTNAME}" \
