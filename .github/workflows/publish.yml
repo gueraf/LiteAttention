@@ -26,6 +26,7 @@ jobs:
 
       - name: Create Release
         id: create_release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: actions/create-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -155,12 +156,19 @@ jobs:
         run: |
           ls dist
 
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-ubuntu-22.04-py${{ matrix.python-version }}-torch${{ matrix.torch-version }}-cuda${{ matrix.cuda-version }}-abi${{ matrix.cxx11_abi }}
+          path: dist/*.whl
+
       - name: Get the tag version
         id: extract_branch
         run: echo ::set-output name=branch::${GITHUB_REF#refs/tags/}
 
       - name: Get Release with tag
         id: get_current_release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: joutvhu/get-release@v1
         with:
           tag_name: ${{ steps.extract_branch.outputs.branch }}
@@ -169,6 +177,7 @@ jobs:
 
       - name: Upload Release Asset
         id: upload_release_asset
+        if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -206,6 +215,7 @@ jobs:
           python setup.py sdist --dist-dir=dist
 
       - name: Deploy
+        if: startsWith(github.ref, 'refs/tags/')
         env:
           TWINE_USERNAME: "__token__"
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
